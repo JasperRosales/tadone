@@ -46,7 +46,15 @@ data class Note(
     val body: String = "",
     val quiz: String = "",
     val updatedAt: Long = System.currentTimeMillis(),
+    /** All text extracted from the files added to this note, kept so the note can be re-structured later. */
+    val source: String = "",
+    /** File names that [source] came from, one per line. */
+    val sourceFiles: String = "",
 )
+
+/** One entry in the Notifications tab. [target] is where clicking it goes, e.g. "task:12", "note:3", "course:abc", "screen:Apps". */
+data class InboxItem(val id: Long = 0, val kind: String, val title: String, val body: String, val target: String? = null,
+                     val createdAt: Long = System.currentTimeMillis(), val read: Boolean = false)
 
 data class Course(val id: String, val name: String, val section: String = "", val room: String = "", val link: String? = null, val modulesFetchedAt: Long? = null)
 data class Topic(val courseId: String, val id: String, val name: String)
@@ -92,6 +100,11 @@ object Db {
             st.executeUpdate("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             st.executeUpdate("CREATE TABLE IF NOT EXISTS notified(key TEXT PRIMARY KEY, at INTEGER NOT NULL)")
             st.executeUpdate(
+                """CREATE TABLE IF NOT EXISTS inbox(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
+                target TEXT, created_at INTEGER NOT NULL, read INTEGER NOT NULL DEFAULT 0)"""
+            )
+            st.executeUpdate(
                 """CREATE TABLE IF NOT EXISTS events(
                 id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, location TEXT NOT NULL DEFAULT '',
                 days INTEGER NOT NULL DEFAULT 0, date INTEGER, start_min INTEGER NOT NULL, end_min INTEGER NOT NULL,
@@ -115,6 +128,16 @@ object Db {
                 body TEXT NOT NULL DEFAULT '', quiz TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL)"""
             )
         }
+        // ---- migrations: add columns that older databases don't have yet ----
+        addColumn("notes", "source", "TEXT NOT NULL DEFAULT ''")
+        addColumn("notes", "source_files", "TEXT NOT NULL DEFAULT ''")
+    }
+
+    private fun addColumn(table: String, column: String, ddl: String) {
+        val has = conn.createStatement().use { st ->
+            st.executeQuery("PRAGMA table_info($table)").use { rs -> generateSequence { if (rs.next()) rs.getString("name") else null }.any { it == column } }
+        }
+        if (!has) conn.createStatement().use { it.executeUpdate("ALTER TABLE $table ADD COLUMN $column $ddl") }
     }
 
     // ---------- tasks ----------
@@ -300,19 +323,19 @@ object Db {
         ps.executeQuery().use { rs ->
             buildList {
                 while (rs.next()) add(Note(rs.getLong("id"), rs.getString("title"), rs.getString("course"),
-                    rs.getString("body"), rs.getString("quiz"), rs.getLong("updated_at")))
+                    rs.getString("body"), rs.getString("quiz"), rs.getLong("updated_at"), rs.getString("source"), rs.getString("source_files")))
             }
         }
     }
 
     @Synchronized
     fun upsertNote(n: Note): Long {
-        val sql = if (n.id == 0L) "INSERT INTO notes(title,course,body,quiz,updated_at) VALUES(?,?,?,?,?)"
-        else "UPDATE notes SET title=?,course=?,body=?,quiz=?,updated_at=? WHERE id=?"
+        val sql = if (n.id == 0L) "INSERT INTO notes(title,course,body,quiz,source,source_files,updated_at) VALUES(?,?,?,?,?,?,?)"
+        else "UPDATE notes SET title=?,course=?,body=?,quiz=?,source=?,source_files=?,updated_at=? WHERE id=?"
         conn.prepareStatement(sql).use { ps ->
             ps.setString(1, n.title); ps.setString(2, n.course); ps.setString(3, n.body); ps.setString(4, n.quiz)
-            ps.setLong(5, System.currentTimeMillis())
-            if (n.id != 0L) ps.setLong(6, n.id)
+            ps.setString(5, n.source); ps.setString(6, n.sourceFiles); ps.setLong(7, System.currentTimeMillis())
+            if (n.id != 0L) ps.setLong(8, n.id)
             ps.executeUpdate()
         }
         return if (n.id != 0L) n.id else lastId()
@@ -349,6 +372,38 @@ object Db {
         conn.prepareStatement(sql).use { ps -> if (taskId != null) ps.setLong(1, taskId); ps.executeUpdate() }
     }
 
+    // ---------- inbox ----------
+    @Synchronized
+    fun addInbox(i: InboxItem): Long {
+        conn.prepareStatement("INSERT INTO inbox(kind,title,body,target,created_at,read) VALUES(?,?,?,?,?,0)").use { ps ->
+            ps.setString(1, i.kind); ps.setString(2, i.title); ps.setString(3, i.body); ps.setString(4, i.target); ps.setLong(5, i.createdAt)
+            ps.executeUpdate()
+        }
+        // keep the inbox small
+        conn.createStatement().use { it.executeUpdate("DELETE FROM inbox WHERE id NOT IN (SELECT id FROM inbox ORDER BY id DESC LIMIT 300)") }
+        return lastId()
+    }
+
+    @Synchronized
+    fun inbox(): List<InboxItem> = conn.prepareStatement("SELECT * FROM inbox ORDER BY id DESC").use { ps ->
+        ps.executeQuery().use { rs ->
+            buildList {
+                while (rs.next()) add(InboxItem(rs.getLong("id"), rs.getString("kind"), rs.getString("title"), rs.getString("body"),
+                    rs.getString("target"), rs.getLong("created_at"), rs.getInt("read") == 1))
+            }
+        }
+    }
+
+    @Synchronized
+    fun markInboxRead(id: Long?) = conn.prepareStatement(if (id == null) "UPDATE inbox SET read=1" else "UPDATE inbox SET read=1 WHERE id=?").use { ps ->
+        if (id != null) ps.setLong(1, id); ps.executeUpdate()
+    }
+
+    @Synchronized
+    fun deleteInbox(id: Long?) = conn.prepareStatement(if (id == null) "DELETE FROM inbox" else "DELETE FROM inbox WHERE id=?").use { ps ->
+        if (id != null) ps.setLong(1, id); ps.executeUpdate()
+    }
+
     /** Records that a reminder was sent; false if it already had been (so each reminder fires once). */
     @Synchronized
     fun markNotified(key: String): Boolean = conn.prepareStatement("INSERT OR IGNORE INTO notified(key,at) VALUES(?,?)").use { ps ->
@@ -378,6 +433,7 @@ object Keys {
     const val NOTIFY_DEADLINES = "notify_deadlines"
     const val NOTIFY_CLASSES = "notify_classes"
     const val NOTIFY_JOBS = "notify_jobs"
+    const val NOTIFY_SOUND = "notify_sound"
     const val CLASSROOM_AUTH_CONFIG = "classroom_auth_config"
     const val DRIVE_AUTH_CONFIG = "drive_auth_config"
     const val LAST_SYNC = "last_sync"

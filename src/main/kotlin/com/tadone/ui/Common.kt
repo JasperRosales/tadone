@@ -3,6 +3,7 @@ package com.tadone.ui
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -111,7 +112,8 @@ fun ChatPanel(
             items(messages, key = { it.id }) { m -> Bubble(m) }
             if (thinking) item { Box(Modifier.clay(Palette.Paper, 18.dp, 3.dp).padding(14.dp)) { ThinkingDots() } }
         }
-        Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(Modifier.fillMaxWidth().horizontalScroll(androidx.compose.foundation.rememberScrollState()).padding(vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             suggestions.forEach { s ->
                 Text(s, style = MaterialTheme.typography.labelSmall, color = Palette.Bark,
                     modifier = Modifier.clay(Palette.Cream, 50.dp, 3.dp).pressable { onSend(s) }.padding(horizontal = 10.dp, vertical = 6.dp))

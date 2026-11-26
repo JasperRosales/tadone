@@ -121,6 +121,23 @@ class Assistant(apiKey: String, private val model: String = DEFAULT_MODEL) {
         )
     }
 
+    /** Rewrites raw extracted text as a structured study note (same layout as the local structurer). */
+    fun structureNotes(title: String, raw: String): String {
+        val sys = """
+            Turn the student's raw course material into clear study notes in Markdown, using exactly this layout:
+            # <title>
+            ## Overview
+            - 2 to 4 bullets on what the material covers
+            ## Key terms
+            - **Term**: short definition   (every important term, one per line)
+            ## <one heading per topic, in the material's order>
+            - one fact or idea per bullet, short and precise; nest sub-points with two spaces
+            Keep every fact from the material; do not invent anything. No emojis, no extra commentary.
+        """.trimIndent()
+        val out = send(sys, listOf(ChatMsg(taskId = null, role = "user", content = "Title: $title\n\n${raw.take(60_000)}")))
+        return out.removePrefix("```markdown").removePrefix("```md").removePrefix("```").removeSuffix("```").trim() + "\n"
+    }
+
     /** Builds a multiple-choice practice quiz from a note. Returns the quiz as JSON text (see [Quiz.parse]). */
     fun quiz(title: String, course: String, body: String, count: Int): String {
         val sys = """

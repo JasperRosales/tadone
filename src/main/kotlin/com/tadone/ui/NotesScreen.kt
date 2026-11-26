@@ -80,28 +80,33 @@ private fun NoteRow(n: Note, selected: Boolean, modifier: Modifier, onClick: () 
             Text(SimpleDateFormat("MMM d").format(Date(n.updatedAt)), color = fg.copy(.7f), style = MaterialTheme.typography.labelSmall)
             if (n.quiz.isNotBlank()) { Spacer(Modifier.width(6.dp)); Icon(Icons.Rounded.Quiz, "Has quiz", tint = fg.copy(.8f), modifier = Modifier.size(14.dp)) }
         }
-        if (n.body.isNotBlank()) Text(n.body.take(140).replace('\n', ' '), color = fg.copy(.75f), style = MaterialTheme.typography.bodySmall,
+        val preview = n.body.lines().map { it.trim() }
+            .filter { it.isNotBlank() && !it.startsWith("#") && !it.startsWith(">") && !it.startsWith("- Covers:") && !Regex("^- \\d+ sections?").containsMatchIn(it) }
+            .joinToString(" ") { it.removePrefix("- ").replace("**", "") }.take(140)
+        if (preview.isNotBlank()) Text(preview, color = fg.copy(.75f), style = MaterialTheme.typography.bodySmall,
             maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 
 @Composable
 private fun NoteEditor(s: AppState, n: Note, modifier: Modifier) {
-    var title by remember(n.id) { mutableStateOf(n.title) }
-    var course by remember(n.id) { mutableStateOf(n.course) }
-    var body by remember(n.id) { mutableStateOf(n.body) }
+    // re-read when a background job (file import, restructure) rewrites this note
+    val rev = s.noteRevisions[n.id] ?: 0
+    var title by remember(n.id, rev) { mutableStateOf(n.title) }
+    var course by remember(n.id, rev) { mutableStateOf(n.course) }
+    var body by remember(n.id, rev) { mutableStateOf(n.body) }
     var count by remember { mutableStateOf(5) }
     val current = n.copy(title = title, course = course, body = body)
 
     // autosave shortly after typing stops
-    LaunchedEffect(n.id, title, course, body) {
+    LaunchedEffect(n.id, rev, title, course, body) {
         if (title != n.title || course != n.course || body != n.body) { delay(600); s.saveNote(current) }
     }
 
     Column(modifier.clay(Palette.Paper, 30.dp, 18.dp).padding(22.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Row(Modifier.width(320.dp).clay(Palette.CreamDeep, 50.dp, 2.dp).padding(4.dp)) {
-                listOf("Note", "Practice quiz").forEachIndexed { i, label ->
+            Row(Modifier.width(420.dp).clay(Palette.CreamDeep, 50.dp, 2.dp).padding(4.dp)) {
+                listOf("Note", "Source", "Practice quiz").forEachIndexed { i, label ->
                     val sel = s.noteTab == i
                     val bg by animateColorAsState(if (sel) Palette.Amber else Color.Transparent)
                     Text(label, color = if (sel) Color.White else Palette.Bark, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
@@ -120,13 +125,17 @@ private fun NoteEditor(s: AppState, n: Note, modifier: Modifier) {
                     Column(Modifier.weight(1f)) { SectionLabel("Subject"); ClayField(course, { course = it }, "e.g. Biology", Modifier.fillMaxWidth()) }
                 }
                 Spacer(Modifier.height(12.dp))
+                NoteTools(s, current)
+                Spacer(Modifier.height(10.dp))
                 SectionLabel("Notes")
-                ClayField(body, { body = it }, "Type or paste your notes here…", Modifier.fillMaxWidth().weight(1f), singleLine = false, minLines = 12)
+                ClayField(body, { body = it }, "Type or paste your notes here, or use Add from file to build them from a PDF or slides…",
+                    Modifier.fillMaxWidth().weight(1f), singleLine = false, minLines = 12)
                 Spacer(Modifier.height(14.dp))
                 QuizBar(s, n.id, count, { count = it },
-                    onQuick = { s.saveNote(current); s.quickQuiz(current, count); s.noteTab = 1 },
-                    onSmart = { s.saveNote(current); s.generateQuiz(current, count); s.noteTab = 1 })
-            } else QuizPanel(s, n, count, { count = it },
+                    onQuick = { s.saveNote(current); s.quickQuiz(current, count); s.noteTab = 2 },
+                    onSmart = { s.saveNote(current); s.generateQuiz(current, count); s.noteTab = 2 })
+            } else if (which == 1) SourcePanel(s, n)
+            else QuizPanel(s, n, count, { count = it },
                 onQuick = { s.saveNote(current); s.quickQuiz(current, count) },
                 onSmart = { s.saveNote(current); s.generateQuiz(current, count) })
         }
@@ -230,4 +239,53 @@ private fun pickFiles(): List<java.io.File> {
     d.setFilenameFilter { _, name -> name.substringAfterLast('.', "").lowercase() in com.tadone.data.MarkdownImport.extensions }
     d.isVisible = true
     return d.files.orEmpty().toList()
+}
+
+/** Per-note actions: pull text from files, rebuild the structure locally, or let Gemini organise it. */
+@Composable
+private fun NoteTools(s: AppState, n: Note) {
+    val reading = s.running("note-files:${n.id}")
+    val aiBusy = s.running("ai-structure:${n.id}")
+    Row(Modifier.fillMaxWidth().clay(Palette.Cream.lighten(.35f), 18.dp, 3.dp).padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+        ClayButton(if (reading) "Reading…" else "Add from file", Icons.Rounded.UploadFile, Palette.Olive, enabled = !reading) {
+            pickFiles().takeIf { it.isNotEmpty() }?.let { s.saveNote(n); s.addFilesToNote(n, it) }
+        }
+        Spacer(Modifier.width(8.dp))
+        ClayButton("Restructure", Icons.Rounded.AccountTree, Palette.Cream, Palette.Bark, enabled = !reading && !aiBusy) { s.saveNote(n); s.restructureNote(n) }
+        Spacer(Modifier.width(8.dp))
+        ClayButton(if (aiBusy) "Organising…" else "Structure with Gemini", Icons.Rounded.AutoAwesome, Palette.Cream, Palette.Bark, enabled = !reading && !aiBusy) {
+            s.saveNote(n); s.structureWithAi(n)
+        }
+        Spacer(Modifier.weight(1f))
+        val files = n.sourceFiles.lines().filter { it.isNotBlank() }
+        Text(if (files.isEmpty()) "PDF, PowerPoint, Word or Markdown" else "From ${files.size} file${if (files.size > 1) "s" else ""}",
+            color = Palette.Bark.copy(.6f), style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+/** Read-only view of all text extracted from the note's files. */
+@Composable
+private fun SourcePanel(s: AppState, n: Note) {
+    Column(Modifier.fillMaxSize()) {
+        val files = n.sourceFiles.lines().filter { it.isNotBlank() }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(if (files.isEmpty()) "No files yet" else files.joinToString(", "), color = Palette.Bark, fontWeight = FontWeight.SemiBold,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text("Everything extracted from your files, kept so the note can be restructured without reading the files again.",
+                    color = Palette.Bark.copy(.6f), style = MaterialTheme.typography.labelSmall)
+            }
+            ClayButton("Add from file", Icons.Rounded.UploadFile, Palette.Olive, enabled = !s.running("note-files:${n.id}")) {
+                pickFiles().takeIf { it.isNotEmpty() }?.let { s.addFilesToNote(n, it) }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        Box(Modifier.fillMaxSize().clay(Palette.Cream.lighten(.4f), 18.dp, 3.dp).padding(16.dp)) {
+            if (n.source.isBlank()) Text("Use Add from file to pull all the text out of a PDF, PowerPoint or Word file.", color = Palette.Bark.copy(.6f))
+            else androidx.compose.foundation.text.selection.SelectionContainer {
+                Text(n.source, color = Palette.Ink, style = MaterialTheme.typography.bodySmall,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, modifier = Modifier.verticalScroll(rememberScrollState()))
+            }
+        }
+    }
 }

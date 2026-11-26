@@ -95,13 +95,14 @@ fun App(focused: Boolean = true) {
                         Screen.Classes -> ClassesScreen(s)
                         Screen.Schedule -> ScheduleScreen(s)
                         Screen.Notes -> NotesScreen(s)
-                        Screen.Assistant -> AssistantScreen(s)
                         Screen.Apps -> AppsScreen(s)
+                        Screen.Inbox -> InboxScreen(s)
                         Screen.Settings -> SettingsScreen(s)
                     }
                 }
             }
         }
+        if (s.signedIn) AssistantBubble(s, Modifier.align(Alignment.BottomEnd).padding(end = 24.dp, bottom = 24.dp))
         ActivityPills(s.jobs.values.filter { it.isNotBlank() }, Modifier.align(Alignment.TopCenter).padding(top = 14.dp))
         Toast(s, Modifier.align(Alignment.BottomCenter).padding(bottom = 26.dp))
     }
@@ -122,24 +123,30 @@ private fun Sidebar(s: AppState) {
         NavItem(Icons.Rounded.School, "Classes", s.screen == Screen.Classes) { s.screen = Screen.Classes }
         NavItem(Icons.Rounded.CalendarMonth, "Schedule", s.screen == Screen.Schedule) { s.screen = Screen.Schedule }
         NavItem(Icons.Rounded.EditNote, "Notes", s.screen == Screen.Notes) { s.screen = Screen.Notes }
-        NavItem(Icons.Rounded.AutoAwesome, "Ask", s.screen == Screen.Assistant) { s.screen = Screen.Assistant }
         NavItem(Icons.Rounded.Apps, "Apps", s.screen == Screen.Apps) { s.screen = Screen.Apps }
+        NavItem(Icons.Rounded.Notifications, "Alerts", s.screen == Screen.Inbox, badge = s.unread) { s.screen = Screen.Inbox }
         Spacer(Modifier.weight(1f))
         NavItem(Icons.Rounded.Settings, "Settings", s.screen == Screen.Settings) { s.screen = Screen.Settings }
     }
 }
 
 @Composable
-private fun NavItem(icon: ImageVector, label: String, selected: Boolean, onClick: () -> Unit) {
+private fun NavItem(icon: ImageVector, label: String, selected: Boolean, badge: Int = 0, onClick: () -> Unit) {
     val bg by animateColorAsState(if (selected) Palette.Amber else Color.Transparent)
     val fg by animateColorAsState(if (selected) Color.White else Palette.Cream.copy(.7f))
     val lift by animateFloatAsState(if (selected) 1.08f else 1f, spring(.45f, 300f))
     Column(
-        Modifier.padding(vertical = 6.dp).graphicsLayer { scaleX = lift; scaleY = lift }
-            .background(bg, RoundedCornerShape(18.dp)).pressable(onClick).padding(horizontal = 12.dp, vertical = 10.dp),
+        Modifier.padding(vertical = 3.dp).graphicsLayer { scaleX = lift; scaleY = lift }
+            .background(bg, RoundedCornerShape(18.dp)).pressable(onClick).padding(horizontal = 10.dp, vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(icon, label, tint = fg)
+        Box {
+            Icon(icon, label, tint = fg)
+            if (badge > 0) Text(if (badge > 9) "9+" else "$badge", color = Color.White, fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.align(Alignment.TopEnd).offset(x = 10.dp, y = (-6).dp)
+                    .background(Color(0xFFB3401E), RoundedCornerShape(50)).padding(horizontal = 5.dp))
+        }
         Text(label, color = fg, style = MaterialTheme.typography.labelSmall)
     }
 }

@@ -8,7 +8,7 @@ import com.tadone.data.*
 import kotlinx.coroutines.*
 import java.io.File
 
-enum class Screen { Tasks, Classes, Schedule, Notes, Assistant, Apps, Settings }
+enum class Screen { Tasks, Classes, Schedule, Notes, Apps, Inbox, Settings }
 enum class Filter { Open, Today, Classroom, Done, All }
 
 class AppState(private val scope: CoroutineScope) {
@@ -30,10 +30,15 @@ class AppState(private val scope: CoroutineScope) {
     /** True while the main window has focus; background results also go to system notifications when it doesn't. */
     var windowFocused by mutableStateOf(true)
 
-    var chat by mutableStateOf(listOf<ChatMsg>())
-    private var chatTaskId: Long? = null
+    /** Messages per chat: null = the floating assistant, otherwise a task's own chat. Each can be waiting on Gemini at once. */
+    var chats by mutableStateOf(mapOf<Long?, List<ChatMsg>>())
     var thinkingIn by mutableStateOf(setOf<Long?>())
-    val thinking get() = chatTaskId in thinkingIn
+    fun chatFor(taskId: Long?) = chats[taskId].orEmpty()
+    fun isThinking(taskId: Long?) = taskId in thinkingIn
+
+    /** Floating assistant bubble: open/closed, and whether a reply arrived while it was closed. */
+    var assistantOpen by mutableStateOf(false)
+    var assistantUnread by mutableStateOf(false)
 
     /** False until the user signs in (or chooses offline) — shows the sign-in page. */
     var signedIn by mutableStateOf(Db.get(Keys.COMPOSIO_KEY).isNotBlank() || Db.get(Keys.OFFLINE) == "1")
@@ -77,33 +82,67 @@ class AppState(private val scope: CoroutineScope) {
     val loadingCourses get() = running("courses")
     val loadingModules get() = jobs.keys.filter { it.startsWith("modules:") }.map { it.removePrefix("modules:") }.toSet()
 
-    fun reload() { tasks = Db.tasks(); events = Db.events(); notes = Db.notes(); courses = Db.courses() }
+    /** Bumped when a background job rewrites a note, so an open editor picks up the new text. */
+    var noteRevisions by mutableStateOf(mapOf<Long, Int>())
+    private fun bumpNote(id: Long) { noteRevisions = noteRevisions + (id to (noteRevisions[id] ?: 0) + 1) }
+
+    var inbox by mutableStateOf(listOf<InboxItem>())
+    val unread get() = inbox.count { !it.read }
+
+    fun reload() { tasks = Db.tasks(); events = Db.events(); notes = Db.notes(); courses = Db.courses(); inbox = Db.inbox() }
 
     /**
      * Runs [block] on the IO pool as job [key]. Returns false (and does nothing) if that job is already running.
      * [label] is shown in the activity pill; null keeps it silent. [done] becomes a notification when the window is in the background.
      */
-    private fun job(key: String, label: String?, done: String? = null, block: suspend CoroutineScope.() -> Unit): Boolean {
+    private fun job(key: String, label: String?, done: String? = null, target: String? = null, block: suspend CoroutineScope.() -> Unit): Boolean {
         if (key in jobs) return false
         jobs[key] = label ?: ""
         scope.launch {
             try {
                 withContext(Dispatchers.IO) { block() }
-                if (done != null) notify("Tadone", done, background = true)
+                if (done != null) notify("Done", done, kind = "activity", target = target, background = true)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                toast = e.message ?: e.toString()
+                val msg = e.message ?: e.toString()
+                notify("Something went wrong", msg, kind = "error", target = target, system = false)
             } finally { jobs.remove(key); reload() }
         }
         return true
     }
     private fun progress(key: String, label: String) { if (key in jobs) jobs[key] = label }
 
-    /** Shows a toast, and a system notification too when [background] work finishes while the app isn't focused. */
-    fun notify(title: String, body: String, background: Boolean = false) {
+    /**
+     * Records a notification in the Notifications tab and shows a toast. A system notification is also sent
+     * when [system] is set, except for [background] results while the window is focused (the toast is enough then).
+     */
+    fun notify(title: String, body: String, kind: String = "activity", target: String? = null, background: Boolean = false, system: Boolean = true) {
         toast = body
-        if (!background || !windowFocused) if (!background || Db.get(Keys.NOTIFY_JOBS, "1") == "1") Notifier.send(title, body)
+        Db.addInbox(InboxItem(kind = kind, title = title, body = body, target = target))
+        inbox = Db.inbox()
+        val wantSystem = system && (!background || (!windowFocused && Db.get(Keys.NOTIFY_JOBS, "1") == "1"))
+        if (wantSystem) Notifier.send(title, body, kind)
+    }
+
+    /** Settings test button: sends a real notification + sound and reports how it went. */
+    fun testNotification() = scope.launch {
+        toast = withContext(Dispatchers.IO) { Notifier.test() }
+    }
+
+    fun markRead(i: InboxItem?) { Db.markInboxRead(i?.id); inbox = Db.inbox() }
+    fun clearInbox(i: InboxItem? = null) { Db.deleteInbox(i?.id); inbox = Db.inbox() }
+
+    /** Goes wherever a notification points: a task, note, class or screen. */
+    fun openTarget(target: String?) {
+        val (kind, id) = target?.split(":", limit = 2)?.let { it[0] to it.getOrElse(1) { "" } } ?: return
+        when (kind) {
+            "task" -> { selectedId = id.toLongOrNull(); filter = Filter.All; screen = Screen.Tasks }
+            "note" -> { selectedNoteId = id.toLongOrNull(); noteTab = 0; screen = Screen.Notes }
+            "quiz" -> { selectedNoteId = id.toLongOrNull(); noteTab = 2; screen = Screen.Notes }
+            "course" -> { screen = Screen.Classes; openCourse(id) }
+            "screen" -> runCatching { Screen.valueOf(id) }.getOrNull()?.let { screen = it }
+        }
     }
 
     // ---- tasks ----
@@ -132,7 +171,7 @@ class AppState(private val scope: CoroutineScope) {
     /** Refreshes coursework + submission state for the task list (2 calls per course + 1 for the course list). */
     fun syncClassroom() {
         var n = 0
-        job("sync", "Syncing Google Classroom…", done = "Classroom sync finished") {
+        job("sync", "Syncing Google Classroom…", done = "Classroom sync finished", target = "screen:Tasks") {
             val c = composio()
             val list = c.courses().also(Db::saveCourses)
             courses = Db.courses()
@@ -158,7 +197,7 @@ class AppState(private val scope: CoroutineScope) {
         val cached = courses.firstOrNull { it.id == id }?.modulesFetchedAt != null
         if (cached && !force) return
         val name = courses.firstOrNull { it.id == id }?.name ?: "class"
-        job("modules:$id", null, done = "Modules for $name are ready") {
+        job("modules:$id", null, done = "Modules for $name are ready", target = "course:$id") {
             val (topics, items) = composio().courseModules(id)
             Db.saveModules(id, topics, items)
             withContext(Dispatchers.Main) {
@@ -295,7 +334,7 @@ class AppState(private val scope: CoroutineScope) {
                     }
                     throw ComposioException("Didn't hear back from $name — try Connect again.")
                 }
-                notify("Tadone", "$name connected", background = true)
+                notify("Done", "$name connected", target = "screen:Apps", background = true)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -332,8 +371,8 @@ class AppState(private val scope: CoroutineScope) {
         scope.launch {
             runCatching { withContext(Dispatchers.IO) { ai().quiz(n.title, n.course, n.body, count) } }
                 .onSuccess { q -> Db.upsertNote(Db.notes().firstOrNull { it.id == n.id }?.copy(quiz = q) ?: n.copy(quiz = q)); notes = Db.notes()
-                    notify("Tadone", "Practice quiz ready: ${n.title.ifBlank { "note" }}", background = true) }
-                .onFailure { toast = it.message ?: it.toString() }
+                    notify("Done", "Practice quiz ready: ${n.title.ifBlank { "note" }}", target = "quiz:${n.id}", background = true) }
+                .onFailure { notify("Quiz failed", it.message ?: it.toString(), kind = "error", target = "note:${n.id}", system = false) }
             quizzing = quizzing - n.id
         }
     }
@@ -349,23 +388,77 @@ class AppState(private val scope: CoroutineScope) {
         }
     }
 
-    /** Converts files to Markdown notes on this computer, a few at a time, all in parallel with other work. */
+    /** Imports each file as its own structured study note (text extraction + structuring both run locally). */
     fun importFiles(files: List<File>) {
-        val ok = files.filter { it.extension.lowercase() in MarkdownImport.extensions }
-        if (ok.size < files.size) toast = "Skipped ${files.size - ok.size} unsupported file(s). Use PDF, PowerPoint, Word, Markdown or text."
+        val ok = supported(files)
         ok.forEach { f ->
-            job("import:${f.absolutePath}", "Converting ${f.name}…", done = "Imported ${f.name}") {
-                importGate.acquire()
-                try {
+            var noteId = 0L
+            job("import:${f.absolutePath}", "Reading ${f.name}…", done = "Notes ready from ${f.name}", target = null) {
+                importGate.withPermit {
                     val r = MarkdownImport.convert(f)
-                    val id = Db.upsertNote(Note(title = r.title, body = r.markdown))
-                    withContext(Dispatchers.Main) { selectedNoteId = id; noteTab = 0 }
-                    toast = "Imported ${f.name}"
-                } finally { importGate.release() }
+                    progress("import:${f.absolutePath}", "Structuring ${f.name}…")
+                    val body = StudyNotes.structure(r.markdown, r.title, f.name)
+                    noteId = Db.upsertNote(Note(title = r.title, body = body, source = r.markdown, sourceFiles = f.name))
+                    withContext(Dispatchers.Main) { selectedNoteId = noteId; noteTab = 0 }
+                }
             }
         }
     }
+
+    /**
+     * "Add from file" on an existing note: extracts all text from the files, keeps it as the note's source,
+     * and rebuilds the note as structured study content (overview, key terms, sections) ready for a quiz.
+     */
+    fun addFilesToNote(n: Note, files: List<File>) {
+        val ok = supported(files)
+        if (ok.isEmpty()) return
+        val names = ok.joinToString { it.name }
+        job("note-files:${n.id}", "Reading $names…", done = "Structured notes ready: ${n.title.ifBlank { names }}", target = "note:${n.id}") {
+            val parts = ok.map { f -> importGate.withPermit { f.name to MarkdownImport.convert(f).markdown } }
+            progress("note-files:${n.id}", "Structuring notes…")
+            val current = Db.notes().firstOrNull { it.id == n.id } ?: n
+            val added = parts.joinToString("\n\n") { (name, md) -> "<!-- from $name -->\n$md" }
+            val source = listOf(current.source, added).filter { it.isNotBlank() }.joinToString("\n\n")
+            val files = (current.sourceFiles.lines() + parts.map { it.first }).filter { it.isNotBlank() }.distinct()
+            val title = current.title.takeUnless { it.isBlank() || it == "Untitled note" } ?: ok.first().nameWithoutExtension.replace('_', ' ')
+            val structured = StudyNotes.structure(source, title, files.joinToString(", "))
+            // keep anything the student typed that didn't come from a file
+            val typed = current.body.takeIf { it.isNotBlank() && current.source.isBlank() }
+            val body = if (typed != null) "$structured\n## My notes\n\n$typed\n" else structured
+            Db.upsertNote(current.copy(title = title, body = body, source = source, sourceFiles = files.joinToString("\n")))
+            withContext(Dispatchers.Main) { bumpNote(n.id); noteTab = 0 }
+        }
+    }
+
+    /** Rebuilds a note's structure from its saved source text (no file picking, no network). */
+    fun restructureNote(n: Note) {
+        val current = Db.notes().firstOrNull { it.id == n.id } ?: n
+        val raw = current.source.ifBlank { current.body }
+        if (raw.isBlank()) { toast = "Nothing to structure yet. Add a file or write some notes."; return }
+        Db.upsertNote(current.copy(body = StudyNotes.structure(raw, current.title, current.sourceFiles.lines().filter { it.isNotBlank() }.joinToString(", ").ifBlank { null }),
+            source = current.source.ifBlank { current.body }))
+        notes = Db.notes(); bumpNote(n.id); toast = "Notes restructured"
+    }
+
+    /** Optional: asks Gemini (one request) to write the structured note from the source text, in the same layout. */
+    fun structureWithAi(n: Note) {
+        val current = Db.notes().firstOrNull { it.id == n.id } ?: n
+        val raw = current.source.ifBlank { current.body }
+        if (raw.isBlank()) { toast = "Nothing to structure yet. Add a file or write some notes."; return }
+        job("ai-structure:${n.id}", "Gemini is organising your notes…", done = "Gemini finished organising ${current.title}", target = "note:${n.id}") {
+            val md = ai().structureNotes(current.title, raw)
+            Db.upsertNote(current.copy(body = md, source = current.source.ifBlank { current.body }))
+            withContext(Dispatchers.Main) { bumpNote(n.id) }
+        }
+    }
+
+    private fun supported(files: List<File>): List<File> {
+        val ok = files.filter { it.extension.lowercase() in MarkdownImport.extensions }
+        if (ok.size < files.size) toast = "Skipped ${files.size - ok.size} unsupported file(s). Use PDF, PowerPoint, Word, Markdown or text."
+        return ok
+    }
     private val importGate = kotlinx.coroutines.sync.Semaphore(3)
+    private suspend fun <T> kotlinx.coroutines.sync.Semaphore.withPermit(block: suspend () -> T): T { acquire(); try { return block() } finally { release() } }
 
     // ---- reminders ----
     /** Checks deadlines and classes once a minute (local data only, no network) and sends system notifications. */
@@ -379,7 +472,7 @@ class AppState(private val scope: CoroutineScope) {
 
     private fun checkReminders() {
         val now = System.currentTimeMillis()
-        val out = mutableListOf<Pair<String, String>>()
+        val out = mutableListOf<Triple<String, String, String>>() // title, body, kind
         if (Db.get(Keys.NOTIFY_DEADLINES, "1") == "1") Db.tasks().filter { !it.done && it.dueAt != null && it.dueAt > now }.forEach { t ->
             val left = t.dueAt!! - now
             val (key, msg) = when {
@@ -387,24 +480,27 @@ class AppState(private val scope: CoroutineScope) {
                 left <= 86_400_000 -> "t:${t.id}:24h:${t.dueAt}" to "Due in ${left / 3_600_000}h: ${t.title}"
                 else -> return@forEach
             }
-            if (Db.markNotified(key)) out += "Deadline" to msg
+            if (Db.markNotified(key)) { out += Triple("Deadline", msg, "deadline"); Db.addInbox(InboxItem(kind = "deadline", title = "Deadline", body = msg, target = "task:${t.id}")) }
         }
         if (Db.get(Keys.NOTIFY_CLASSES, "1") == "1") {
             val today = java.time.LocalDate.now()
             val nowMin = java.time.LocalTime.now().let { it.hour * 60 + it.minute }
             Db.events().filter { it.occursOn(today) && it.startMin - nowMin in 0..10 }.forEach { e ->
-                if (Db.markNotified("e:${e.id}:${today.toEpochDay()}"))
-                    out += "Class soon" to "${e.title} at ${com.tadone.ui.minutesLabel(e.startMin)}${if (e.location.isNotBlank()) " · ${e.location}" else ""}"
+                if (Db.markNotified("e:${e.id}:${today.toEpochDay()}")) {
+                    val msg = "${e.title} at ${com.tadone.ui.minutesLabel(e.startMin)}${if (e.location.isNotBlank()) " · ${e.location}" else ""}"
+                    out += Triple("Class soon", msg, "class")
+                    Db.addInbox(InboxItem(kind = "class", title = "Class soon", body = msg, target = "screen:Schedule"))
+                }
             }
         }
         // never flood: at most 3 separate notifications, the rest are summarised
-        out.take(3).forEach { (title, body) -> Notifier.send(title, body) }
-        if (out.size > 3) Notifier.send("Tadone", "${out.size - 3} more reminders, open Tadone to see them")
-        if (out.isNotEmpty()) toast = out.first().second
+        out.take(3).forEachIndexed { i, (title, body, kind) -> Notifier.send(title, body, if (i == 0) kind else "silent") }
+        if (out.size > 3) Notifier.send("Tadone", "${out.size - 3} more reminders, open Tadone to see them", "silent")
+        if (out.isNotEmpty()) { toast = out.first().second; inbox = Db.inbox() }
     }
 
     // ---- AI ----
-    fun loadChat(taskId: Long?) { chatTaskId = taskId; chat = Db.chat(taskId) }
+    fun loadChat(taskId: Long?) { chats = chats + (taskId to Db.chat(taskId)) }
 
     /** Each chat (global or per task) can be waiting on Gemini at the same time. */
     fun ask(taskId: Long?, text: String) {
@@ -419,7 +515,8 @@ class AppState(private val scope: CoroutineScope) {
             }
             Db.addChat(ChatMsg(taskId = taskId, role = "assistant", content = reply))
             thinkingIn = thinkingIn - taskId
-            if (chatTaskId == taskId) chat = Db.chat(taskId)
+            loadChat(taskId)
+            if (taskId == null && !assistantOpen) assistantUnread = true
         }
     }
 

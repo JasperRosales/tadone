@@ -25,7 +25,9 @@ fun main(args: Array<String>) {
         val r = MarkdownImport.convert(f)
         println("===== ${f.name} -> '${r.title}' (${System.currentTimeMillis() - t0} ms)")
         val t1 = System.currentTimeMillis()
-        val qs = com.tadone.ai.OfflineQuiz.generate(r.markdown, 6, kotlin.random.Random(7))
+        val structured = com.tadone.data.StudyNotes.structure(r.markdown, r.title, f.name)
+        println("--- structured note:\n$structured")
+        val qs = com.tadone.ai.OfflineQuiz.generate(structured, 6, kotlin.random.Random(7))
         println("quick quiz: ${qs.size} questions in ${System.currentTimeMillis() - t1} ms")
         qs.forEach { q -> println("  Q: ${q.question}"); q.choices.forEachIndexed { i, c -> println("     ${if (i == q.answer) "*" else " "} $c") } }
     }

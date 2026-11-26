@@ -1,6 +1,9 @@
 package com.tadone
 
 import androidx.compose.runtime.*
+import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.use
 import com.tadone.data.Db
@@ -46,6 +49,14 @@ fun main() {
             com.tadone.data.CourseItem("c1", "i5", "material", null, "Course syllabus", createdAt = "2026-10-01"),
         ))
     }
+    if (Db.inbox().isEmpty()) {
+        Db.addInbox(com.tadone.data.InboxItem(kind = "activity", title = "Done", body = "Classroom sync finished", createdAt = System.currentTimeMillis() - 3 * 86_400_000L))
+        Db.markInboxRead(null)
+        Db.addInbox(com.tadone.data.InboxItem(kind = "error", title = "Something went wrong", body = "scan.pdf has no readable text (it may be scanned images).", createdAt = System.currentTimeMillis() - 86_400_000L))
+        Db.addInbox(com.tadone.data.InboxItem(kind = "class", title = "Class soon", body = "Biology lecture at 9:00 AM · Room 204", target = "screen:Schedule", createdAt = System.currentTimeMillis() - 3_600_000L))
+        Db.addInbox(com.tadone.data.InboxItem(kind = "activity", title = "Done", body = "Structured notes ready: Cellular respiration", target = "note:1", createdAt = System.currentTimeMillis() - 1_200_000L))
+        Db.addInbox(com.tadone.data.InboxItem(kind = "deadline", title = "Deadline", body = "Due in 7h: Physics lab report", target = "task:2"))
+    }
     fun shot(name: String, w: Int, h: Int, ms: Long, content: @Composable () -> Unit) {
         ImageComposeScene(w, h, content = { TadoneTheme { content() } }).use { sc ->
             var t = 0L; while (t <= ms) { sc.render(t * 1_000_000); t += 16 }
@@ -63,11 +74,38 @@ fun main() {
     }
     shot("schedule", 1240, 800, 1500) { com.tadone.ui.ScheduleScreen(AppState(rememberCoroutineScope()).apply { reload() }) }
     shot("notes", 1240, 800, 1500) { com.tadone.ui.NotesScreen(AppState(rememberCoroutineScope()).apply { reload(); selectedNoteId = notes.last().id }) }
-    shot("quiz", 1240, 800, 1500) { com.tadone.ui.NotesScreen(AppState(rememberCoroutineScope()).apply { reload(); selectedNoteId = notes.first { it.quiz.isNotBlank() }.id; noteTab = 1 }) }
+    shot("quiz", 1240, 800, 1500) { com.tadone.ui.NotesScreen(AppState(rememberCoroutineScope()).apply { reload(); selectedNoteId = notes.first { it.quiz.isNotBlank() }.id; noteTab = 2 }) }
     Db.set(com.tadone.data.Keys.COMPOSIO_KEY, "preview")
     shot("classes", 1240, 800, 1500) { com.tadone.ui.ClassesScreen(AppState(rememberCoroutineScope()).apply { reload(); openCourse("c1") }) }
     Db.set(com.tadone.data.Keys.COMPOSIO_KEY, "")
     shot("tasks-short", 1240, 640, 1500) { App() }
+    shot("assistant", 1240, 800, 1500) {
+        val s = AppState(rememberCoroutineScope()).apply {
+            reload(); signedIn = true; assistantOpen = true
+            if (Db.chat(null).isEmpty()) {
+                Db.addChat(com.tadone.data.ChatMsg(taskId = null, role = "user", content = "What should I do first?"))
+                Db.addChat(com.tadone.data.ChatMsg(taskId = null, role = "assistant", content = "Start with the Physics lab report: it's due in about 8 hours.\n\n1. Finish the data table\n2. Write the conclusion\n3. Turn it in on Classroom\n\nThen read chapter 5 for Biology before Sunday."))
+            }
+        }
+        androidx.compose.foundation.layout.Box(androidx.compose.ui.Modifier.fillMaxSize()) {
+            com.tadone.ui.TasksScreen(s)
+            com.tadone.ui.AssistantBubble(s, androidx.compose.ui.Modifier.padding(end = 24.dp, bottom = 24.dp))
+        }
+    }
+    shot("assistant-closed", 1240, 800, 1500) {
+        val s = AppState(rememberCoroutineScope()).apply { reload(); assistantUnread = true }
+        androidx.compose.foundation.layout.Box(androidx.compose.ui.Modifier.fillMaxSize()) {
+            com.tadone.ui.TasksScreen(s)
+            com.tadone.ui.AssistantBubble(s, androidx.compose.ui.Modifier.padding(end = 24.dp, bottom = 24.dp))
+        }
+    }
+    shot("inbox", 1240, 800, 1500) { com.tadone.ui.InboxScreen(AppState(rememberCoroutineScope()).apply { reload() }) }
+    shot("note-tools", 1240, 800, 1500) {
+        val n = Db.notes().first { it.title == "Cell respiration" }
+        val raw = "## Cellular Respiration\n\nCellular respiration is the process cells use to turn glucose into ATP. It happens in three stages.\n\n### Glycolysis\n\n- Location: cytoplasm\n- Glucose is split into two pyruvate molecules.\n\n### Electron Transport Chain\n\nMitochondria: the organelle where most ATP is made. Oxygen: the final electron acceptor."
+        Db.upsertNote(n.copy(source = raw, sourceFiles = "lecture-5.pdf", body = com.tadone.data.StudyNotes.structure(raw, "Cell respiration", "lecture-5.pdf")))
+        com.tadone.ui.NotesScreen(AppState(rememberCoroutineScope()).apply { reload(); selectedNoteId = n.id; noteTab = 0 })
+    }
     shot("settings", 1240, 800, 1500) { com.tadone.ui.SettingsScreen(AppState(rememberCoroutineScope()).apply { account = "student@example.com · my_project"; gettingGeminiKey = true }) }
     Db.set(com.tadone.data.Keys.COMPOSIO_KEY, "")
     shot("detail", 1240, 800, 1500) {

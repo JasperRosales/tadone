@@ -7,7 +7,7 @@ import kotlin.random.Random
  * with zero Gemini calls. It works best on structured notes (headings, bullets, "Term: meaning").
  */
 object OfflineQuiz {
-    private data class Definition(val term: String, val meaning: String, val source: String)
+    data class Definition(val term: String, val meaning: String, val source: String)
     private data class Section(val heading: String, val points: List<String>)
 
     private val defLine = Regex("^\\**([A-Za-z][\\w ()/'-]{1,40}?)\\**\\s*(?::|\\s[-\\u2013\\u2014]\\s)\\s*(.{8,220})$")
@@ -32,7 +32,8 @@ object OfflineQuiz {
             else add(choice("\"${d.meaning.trimEnd('.')}\" describes which term?", d.term, termPool, d.source, rnd))
         }
         // 2) which point belongs to which section
-        val withPoints = sections.filter { it.points.isNotEmpty() }
+        // study-note scaffolding sections make poor "which belongs under" questions
+        val withPoints = sections.filter { it.points.isNotEmpty() && it.heading.lowercase() !in setOf("key terms", "overview", "summary", "source") }
         if (withPoints.size >= 2) withPoints.shuffled(rnd).forEach { sec ->
             val right = sec.points.random(rnd)
             val wrong = withPoints.filter { it !== sec }.flatMap { it.points }.filter { it != right }
@@ -76,7 +77,7 @@ object OfflineQuiz {
         return out.filter { it.heading.isNotBlank() }
     }
 
-    private fun definitions(md: String): List<Definition> {
+    fun definitions(md: String): List<Definition> {
         val out = linkedMapOf<String, Definition>()
         md.lines().map(::clean).filter { it.isNotBlank() && !it.startsWith("#") && !it.startsWith("|") && !it.startsWith("<!--") }.forEach { line ->
             // a line may hold several "Term: meaning." sentences
@@ -110,7 +111,7 @@ object OfflineQuiz {
     /** Generic field labels that look like "Term: value" but aren't concepts worth quizzing. */
     private val labels = setOf("location", "net gain", "example", "examples", "e.g", "note", "notes", "date", "time", "type", "result", "results",
         "answer", "step", "steps", "purpose", "input", "output", "inputs", "outputs", "summary", "source", "sources", "reference", "references",
-        "author", "page", "due", "name", "total", "remember", "tip", "important", "objective", "objectives")
+        "author", "page", "due", "name", "total", "remember", "tip", "important", "objective", "objectives", "covers", "source")
     private val participles = setOf("split", "made", "used", "found", "known", "called", "done", "given", "taken", "seen", "built", "held", "kept", "broken")
 
     private val stop = setOf("slide", "this", "that", "these", "there", "they", "their", "when", "what", "which", "with", "from",

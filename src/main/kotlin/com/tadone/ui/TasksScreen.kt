@@ -189,7 +189,7 @@ private fun TaskDetail(s: AppState, t: Task, modifier: Modifier) {
         AnimatedContent(tab, transitionSpec = { fadeIn(tween(220)) + slideInVertically { 20 } togetherWith fadeOut(tween(120)) }) { which ->
             if (which == 1) {
                 ChatPanel(
-                    s.chat, s.thinking, { s.ask(t.id, it) },
+                    s.chatFor(t.id), s.isThinking(t.id), { s.ask(t.id, it) },
                     listOf("Break it down", "Explain simply", "Plan my time", "Check my notes"),
                     Modifier.fillMaxSize(),
                     empty = "I know this task. Ask me to break it down, explain the topic, or plan your time until it's due.",

@@ -75,3 +75,9 @@ tasks.register<JavaExec>("importCheck") {
     args(project.findProperty("dir") ?: "/tmp")
     jvmArgs("-Djava.awt.headless=true")
 }
+
+tasks.register<JavaExec>("notifyCheck") {
+    classpath = sourceSets["preview"].runtimeClasspath
+    mainClass.set("com.tadone.NotifyCheckKt")
+    environment("APPDATA", "/tmp/tadone-preview")
+}

@@ -20,27 +20,6 @@ import com.tadone.data.Db
 import com.tadone.data.Keys
 
 @Composable
-fun AssistantScreen(s: AppState) {
-    LaunchedEffect(Unit) { s.loadChat(null) }
-    Column(Modifier.fillMaxSize().padding(28.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("Ask Tadone", style = MaterialTheme.typography.displaySmall, color = Palette.Bark)
-                Text("Your study sidekick knows every task on your list.", color = Palette.Olive)
-            }
-            ClayButton("New chat", Icons.Rounded.Refresh, Palette.Cream, Palette.Bark) { s.clearChat(null) }
-        }
-        Spacer(Modifier.height(16.dp))
-        ChatPanel(
-            s.chat, s.thinking, { s.ask(null, it) },
-            listOf("What should I do first?", "Plan my week", "What's overdue?", "Help me focus"),
-            Modifier.fillMaxSize().clay(Palette.Paper.copy(alpha = .85f), 30.dp, 14.dp).padding(20.dp),
-            empty = "Hi, I'm Tadone. Ask me to prioritise your work, plan your week, or explain something tricky.",
-        )
-    }
-}
-
-@Composable
 fun SettingsScreen(s: AppState) {
     var aKey by remember { mutableStateOf(Db.get(Keys.GEMINI_KEY)) }
     var model by remember { mutableStateOf(Db.get(Keys.MODEL, DEFAULT_MODEL)) }
@@ -104,6 +83,7 @@ fun SettingsScreen(s: AppState) {
             var deadlines by remember { mutableStateOf(Db.get(Keys.NOTIFY_DEADLINES, "1") == "1") }
             var classes by remember { mutableStateOf(Db.get(Keys.NOTIFY_CLASSES, "1") == "1") }
             var jobsDone by remember { mutableStateOf(Db.get(Keys.NOTIFY_JOBS, "1") == "1") }
+            var sound by remember { mutableStateOf(Db.get(Keys.NOTIFY_SOUND, "1") == "1") }
             @Composable fun toggle(label: String, hint: String, on: Boolean, key: String, set: (Boolean) -> Unit) {
                 Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
@@ -117,8 +97,16 @@ fun SettingsScreen(s: AppState) {
             toggle("Deadlines", "24 hours and 1 hour before a task is due", deadlines, Keys.NOTIFY_DEADLINES) { deadlines = it }
             toggle("Classes", "10 minutes before a class on your Schedule", classes, Keys.NOTIFY_CLASSES) { classes = it }
             toggle("Background work", "When a sync, import or quiz finishes while Tadone is in the background", jobsDone, Keys.NOTIFY_JOBS) { jobsDone = it }
-            Spacer(Modifier.height(6.dp))
-            TextButton({ com.tadone.Notifier.send("Tadone", "Notifications are working.") }) { Text("Send a test notification", color = Palette.Amber) }
+            toggle("Sound", "A different sound for deadlines, classes, finished work and problems", sound, Keys.NOTIFY_SOUND) { sound = it }
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ClayButton("Send a test notification", Icons.Rounded.NotificationsActive, Palette.Olive) { s.testNotification() }
+                Spacer(Modifier.width(12.dp))
+                Text("Preview sounds:", color = Palette.Bark.copy(.6f), style = MaterialTheme.typography.labelSmall)
+                listOf("Deadline" to "deadline", "Class" to "class", "Done" to "activity", "Problem" to "error").forEach { (label, kind) ->
+                    TextButton({ Thread { com.tadone.Sounds.play(kind, force = true) }.start() }) { Text(label, color = Palette.Amber) }
+                }
+            }
         }
         Spacer(Modifier.height(18.dp))
         Text(if (advanced) "▾ Advanced" else "▸ Advanced", color = Palette.Olive, fontWeight = FontWeight.Bold,
