@@ -70,13 +70,13 @@ private fun Header(s: AppState) {
     val open = s.tasks.count { !it.done }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text("$hello ✨", style = MaterialTheme.typography.displaySmall, color = Palette.Bark)
+            Text(hello, style = MaterialTheme.typography.displaySmall, color = Palette.Bark)
             Text(
                 if (open == 0) "Nothing pending. Enjoy the calm." else "$open task${if (open == 1) "" else "s"} waiting — let's make some magic.",
                 color = Palette.Olive, style = MaterialTheme.typography.bodyMedium,
             )
         }
-        ClayButton("Sync Classroom", Icons.Rounded.School, Palette.Olive, enabled = s.busy == null) { s.syncClassroom() }
+        ClayButton("Sync Classroom", Icons.Rounded.School, Palette.Olive, enabled = !s.running("sync")) { s.syncClassroom() }
     }
 }
 
@@ -230,10 +230,10 @@ private fun TaskDetail(s: AppState, t: Task, modifier: Modifier) {
                     }
                     Spacer(Modifier.height(10.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ClayButton("Upload file", Icons.Rounded.UploadFile, Palette.Bark, Palette.Cream, enabled = s.busy == null) {
+                        ClayButton("Upload file", Icons.Rounded.UploadFile, Palette.Bark, Palette.Cream) {
                             pickFile()?.let { s.uploadFile(t, it) }
                         }
-                        ClayButton(if (t.done) "Unsubmit" else "Turn in", Icons.Rounded.TaskAlt, Palette.Olive, enabled = s.busy == null) { s.toggle(t) }
+                        ClayButton(if (t.done) "Unsubmit" else "Turn in", Icons.Rounded.TaskAlt, Palette.Olive, enabled = !s.running("submit:${t.id}")) { s.toggle(t) }
                     }
                     Spacer(Modifier.height(10.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {

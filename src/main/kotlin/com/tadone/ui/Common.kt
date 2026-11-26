@@ -53,7 +53,8 @@ fun ClayField(
     singleLine: Boolean = true, secret: Boolean = false, minLines: Int = 1, onDone: (() -> Unit)? = null,
     leading: (@Composable () -> Unit)? = null,
 ) {
-    Row(modifier.clay(Palette.Paper, 18.dp, 4.dp).padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(modifier.clay(Palette.Paper, 18.dp, 4.dp).padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = if (singleLine) Alignment.CenterVertically else Alignment.Top) {
         leading?.let { it(); Spacer(Modifier.width(10.dp)) }
         Box(Modifier.weight(1f)) {
             if (value.isEmpty()) Text(placeholder, color = Palette.Bark.copy(.45f), style = MaterialTheme.typography.bodyMedium)

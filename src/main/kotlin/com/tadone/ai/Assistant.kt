@@ -1,22 +1,22 @@
 package com.tadone.ai
 
-import com.anthropic.client.AnthropicClient
-import com.anthropic.client.okhttp.AnthropicOkHttpClient
-import com.anthropic.core.JsonValue
-import com.anthropic.models.beta.messages.MessageCreateParams
 import com.tadone.data.ChatMsg
 import com.tadone.data.Task
 import kotlinx.serialization.json.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.text.SimpleDateFormat
 import java.util.Date
 
-const val DEFAULT_MODEL = "claude-opus-5-5"
+const val DEFAULT_MODEL = "gemini-2.5-flash"
 
 /** Tadone's AI brain: a study helper that knows the student's task list. */
 class Assistant(apiKey: String, private val model: String = DEFAULT_MODEL) {
-    private val client: AnthropicClient =
-        if (apiKey.isNotBlank()) AnthropicOkHttpClient.builder().apiKey(apiKey).build()
-        else AnthropicOkHttpClient.fromEnv()
+    private val key = apiKey.ifBlank { System.getenv("GEMINI_API_KEY").orEmpty() }
+    private val http = OkHttpClient.Builder()
+        .readTimeout(120, java.util.concurrent.TimeUnit.SECONDS).build()
 
     private val fmt = SimpleDateFormat("EEE, MMM d yyyy HH:mm")
 
@@ -25,7 +25,7 @@ class Assistant(apiKey: String, private val model: String = DEFAULT_MODEL) {
         Help the student understand, plan and finish their tasks: explain concepts, break work into steps,
         suggest outlines, review drafts and keep them on schedule. Guide their learning — don't just hand over
         finished graded work; when asked for an answer, explain the reasoning so they can write it themselves.
-        Be concise and warm. Use short Markdown lists when helpful.
+        Be concise and warm. Use short Markdown lists when helpful. Never use emojis.
     """.trimIndent()
 
     private fun describe(t: Task) = buildString {
@@ -35,19 +35,54 @@ class Assistant(apiKey: String, private val model: String = DEFAULT_MODEL) {
         if (t.isClassroom) append(" [Classroom: ${t.submissionState ?: "unknown"}]")
     }
 
-    private fun send(system: String, history: List<ChatMsg>, maxTokens: Long = 16000L): String {
-        val b = MessageCreateParams.builder()
-            .model(model)
-            .maxTokens(maxTokens)
-            .system(system)
-            // Server-side fallback if a request is declined by safety classifiers
-            .addBeta("server-side-fallback-2026-07-01")
-            .putAdditionalBodyProperty("fallbacks", JsonValue.from("default"))
-        history.forEach { m -> if (m.role == "user") b.addUserMessage(m.content) else b.addAssistantMessage(m.content) }
-        val res = client.beta().messages().create(b.build())
-        if (res.stopReason().map { it.toString() }.orElse("") == "refusal")
+    private fun send(system: String, history: List<ChatMsg>, maxTokens: Int? = null, json: Boolean = false): String {
+        if (key.isBlank()) error("Add your Gemini API key in Settings first.")
+        val body = buildJsonObject {
+            putJsonObject("systemInstruction") {
+                putJsonArray("parts") { addJsonObject { put("text", system) } }
+            }
+            putJsonArray("contents") {
+                history.forEach { m ->
+                    addJsonObject {
+                        put("role", if (m.role == "user") "user" else "model")
+                        putJsonArray("parts") { addJsonObject { put("text", m.content) } }
+                    }
+                }
+            }
+            if (maxTokens != null || json) putJsonObject("generationConfig") {
+                if (maxTokens != null) put("maxOutputTokens", maxTokens)
+                if (json) put("responseMimeType", "application/json")
+            }
+        }
+        val req = Request.Builder()
+            .url("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
+            .header("x-goog-api-key", key)
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+        val text = http.newCall(req).execute().use { r ->
+            val raw = r.body?.string().orEmpty()
+            if (!r.isSuccessful) {
+                val msg = runCatching {
+                    Json.parseToJsonElement(raw).jsonObject["error"]!!.jsonObject["message"]!!.jsonPrimitive.content
+                }.getOrDefault(raw.take(300))
+                error("Gemini error ${r.code}: $msg")
+            }
+            raw
+        }
+        val res = Json.parseToJsonElement(text).jsonObject
+        if (res["promptFeedback"]?.jsonObject?.get("blockReason") != null)
             return "I can't help with that one — try rephrasing what you need."
-        return res.content().mapNotNull { blk -> blk.text().map { it.text() }.orElse(null) }.joinToString("").trim()
+        val cand = res["candidates"]?.jsonArray?.firstOrNull()?.jsonObject
+            ?: return "I can't help with that one — try rephrasing what you need."
+        val parts = cand["content"]?.jsonObject?.get("parts")?.jsonArray.orEmpty()
+        val out = parts.mapNotNull { p ->
+            val o = p.jsonObject
+            if (o["thought"]?.jsonPrimitive?.booleanOrNull == true) null
+            else o["text"]?.jsonPrimitive?.contentOrNull
+        }.joinToString("").trim()
+        if (out.isEmpty() && cand["finishReason"]?.jsonPrimitive?.contentOrNull == "SAFETY")
+            return "I can't help with that one — try rephrasing what you need."
+        return out
     }
 
     /** Chat about everything (taskId = null) or one specific task. */
@@ -74,7 +109,7 @@ class Assistant(apiKey: String, private val model: String = DEFAULT_MODEL) {
             Reply with ONLY a JSON object: {"title": string, "course": string, "notes": string,
             "due": "YYYY-MM-DDTHH:MM" or null, "priority": 0|1|2}. No prose.
         """.trimIndent()
-        val raw = send(sys, listOf(ChatMsg(taskId = null, role = "user", content = text)), 1024)
+        val raw = send(sys, listOf(ChatMsg(taskId = null, role = "user", content = text)))
         val obj = runCatching {
             Json.parseToJsonElement(raw.substring(raw.indexOf('{'), raw.lastIndexOf('}') + 1)).jsonObject
         }.getOrNull() ?: return Task(title = text)
@@ -85,4 +120,52 @@ class Assistant(apiKey: String, private val model: String = DEFAULT_MODEL) {
             dueAt = due, priority = s("priority")?.toIntOrNull()?.coerceIn(0, 2) ?: 1,
         )
     }
+
+    /** Builds a multiple-choice practice quiz from a note. Returns the quiz as JSON text (see [Quiz.parse]). */
+    fun quiz(title: String, course: String, body: String, count: Int): String {
+        val sys = """
+            You write practice quizzes for a student from their own study notes.
+            Write exactly $count multiple-choice questions that test understanding of the notes, not trivia about wording.
+            Mix recall, application and "which is NOT" style questions. Each question has exactly 4 choices and one correct answer.
+            Base every question only on the notes. Never use emojis.
+            Reply with ONLY JSON: {"questions":[{"question":string,"choices":[string,string,string,string],"answer":0-3,"explanation":string}]}
+        """.trimIndent()
+        val prompt = buildString {
+            if (title.isNotBlank()) appendLine("Title: $title")
+            if (course.isNotBlank()) appendLine("Subject: $course")
+            appendLine("Notes:"); append(body.take(30_000))
+        }
+        val raw = send(sys, listOf(ChatMsg(taskId = null, role = "user", content = prompt)), json = true)
+        val quiz = Quiz.parse(raw)
+        if (quiz.isEmpty()) error("Gemini didn't return a usable quiz. Try again.")
+        return Quiz.toJson(quiz)
+    }
+}
+
+data class QuizQuestion(val question: String, val choices: List<String>, val answer: Int, val explanation: String)
+
+object Quiz {
+    fun parse(raw: String): List<QuizQuestion> = runCatching {
+        val start = raw.indexOf('{'); val end = raw.lastIndexOf('}')
+        Json.parseToJsonElement(raw.substring(start, end + 1)).jsonObject["questions"]!!.jsonArray.mapNotNull { q ->
+            val o = q.jsonObject
+            val choices = o["choices"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
+            val answer = o["answer"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
+            val text = o["question"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            if (choices.size < 2 || answer !in choices.indices) null
+            else QuizQuestion(text, choices, answer, o["explanation"]?.jsonPrimitive?.contentOrNull.orEmpty())
+        }
+    }.getOrDefault(emptyList())
+
+    fun toJson(qs: List<QuizQuestion>): String = buildJsonObject {
+        putJsonArray("questions") {
+            qs.forEach { q ->
+                addJsonObject {
+                    put("question", q.question)
+                    putJsonArray("choices") { q.choices.forEach { add(it) } }
+                    put("answer", q.answer); put("explanation", q.explanation)
+                }
+            }
+        }
+    }.toString()
 }

@@ -30,6 +30,13 @@ fun main() = application {
     var ready by remember { mutableStateOf(false) }
     var progress by remember { mutableStateOf(.1f) }
     val icon = painterResource("tadone.png")
+    // Windows / macOS notifications go through a tray icon; Linux uses notify-send (see Notifier).
+    val useTray = remember { !System.getProperty("os.name").lowercase().contains("linux") && java.awt.SystemTray.isSupported() }
+    if (useTray) {
+        val trayState = rememberTrayState()
+        Tray(icon, state = trayState, tooltip = "Tadone")
+        LaunchedEffect(trayState) { Notifier.tray = { t, b -> trayState.sendNotification(Notification(t, b, Notification.Type.Info)) } }
+    }
 
     if (!ready) {
         Window(
@@ -51,21 +58,33 @@ fun main() = application {
             state = rememberWindowState(position = WindowPosition(Alignment.Center), size = DpSize(1240.dp, 800.dp)),
         ) {
             window.minimumSize = java.awt.Dimension(980, 640)
-            TadoneTheme { App() }
+            var focused by remember { mutableStateOf(true) }
+            DisposableEffect(window) {
+                val l = object : java.awt.event.WindowAdapter() {
+                    override fun windowGainedFocus(e: java.awt.event.WindowEvent?) { focused = true }
+                    override fun windowLostFocus(e: java.awt.event.WindowEvent?) { focused = false }
+                }
+                window.addWindowFocusListener(l)
+                onDispose { window.removeWindowFocusListener(l) }
+            }
+            TadoneTheme { App(focused) }
         }
     }
 }
 
 @Composable
-fun App() {
+fun App(focused: Boolean = true) {
     val scope = rememberCoroutineScope()
     val s = remember { AppState(scope).apply { reload() } }
+    LaunchedEffect(focused) { s.windowFocused = focused }
+    LaunchedEffect(Unit) { s.startReminders() }
     val enter = remember { Animatable(0f) }
     LaunchedEffect(Unit) { enter.animateTo(1f, spring(.7f, 120f)) }
+    LaunchedEffect(s.signedIn) { if (s.signedIn) s.refreshConnections() }
 
     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Palette.Cream.lighten(.25f), Palette.Cream)))) {
         AmbientOrbs(Modifier.matchParentSize())
-        Row(Modifier.fillMaxSize().graphicsLayer { alpha = enter.value; scaleX = .96f + .04f * enter.value; scaleY = scaleX }) {
+        if (!s.signedIn) SignInScreen(s) else Row(Modifier.fillMaxSize().graphicsLayer { alpha = enter.value; scaleX = .96f + .04f * enter.value; scaleY = scaleX }) {
             Sidebar(s)
             Box(Modifier.weight(1f).fillMaxHeight()) {
                 AnimatedContent(s.screen, transitionSpec = {
@@ -73,13 +92,17 @@ fun App() {
                 }) { scr ->
                     when (scr) {
                         Screen.Tasks -> TasksScreen(s)
+                        Screen.Classes -> ClassesScreen(s)
+                        Screen.Schedule -> ScheduleScreen(s)
+                        Screen.Notes -> NotesScreen(s)
                         Screen.Assistant -> AssistantScreen(s)
+                        Screen.Apps -> AppsScreen(s)
                         Screen.Settings -> SettingsScreen(s)
                     }
                 }
             }
         }
-        BusyPill(s.busy, Modifier.align(Alignment.TopCenter).padding(top = 14.dp))
+        ActivityPills(s.jobs.values.filter { it.isNotBlank() }, Modifier.align(Alignment.TopCenter).padding(top = 14.dp))
         Toast(s, Modifier.align(Alignment.BottomCenter).padding(bottom = 26.dp))
     }
 }
@@ -94,9 +117,13 @@ private fun Sidebar(s: AppState) {
         Box(Modifier.size(52.dp).graphicsLayer { rotationY = spin * 2; rotationX = spin; cameraDistance = 8f * density }.clay(Palette.Amber, 16.dp, 10.dp), contentAlignment = Alignment.Center) {
             Icon(Icons.Rounded.Check, null, tint = Palette.Cream, modifier = Modifier.size(30.dp))
         }
-        Spacer(Modifier.height(30.dp))
+        Spacer(Modifier.height(16.dp))
         NavItem(Icons.Rounded.TaskAlt, "Tasks", s.screen == Screen.Tasks) { s.screen = Screen.Tasks }
+        NavItem(Icons.Rounded.School, "Classes", s.screen == Screen.Classes) { s.screen = Screen.Classes }
+        NavItem(Icons.Rounded.CalendarMonth, "Schedule", s.screen == Screen.Schedule) { s.screen = Screen.Schedule }
+        NavItem(Icons.Rounded.EditNote, "Notes", s.screen == Screen.Notes) { s.screen = Screen.Notes }
         NavItem(Icons.Rounded.AutoAwesome, "Ask", s.screen == Screen.Assistant) { s.screen = Screen.Assistant }
+        NavItem(Icons.Rounded.Apps, "Apps", s.screen == Screen.Apps) { s.screen = Screen.Apps }
         Spacer(Modifier.weight(1f))
         NavItem(Icons.Rounded.Settings, "Settings", s.screen == Screen.Settings) { s.screen = Screen.Settings }
     }
@@ -117,19 +144,30 @@ private fun NavItem(icon: ImageVector, label: String, selected: Boolean, onClick
     }
 }
 
+/** One pill per running job (up to 3), so parallel work stays visible. */
 @Composable
-private fun BusyPill(text: String?, modifier: Modifier) {
-    AnimatedVisibility(text != null, modifier, enter = slideInVertically { -it } + fadeIn(), exit = slideOutVertically { -it } + fadeOut()) {
-        Row(Modifier.clay(Palette.Bark, 50.dp, 12.dp).padding(horizontal = 18.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            ThinkingDots(Palette.Amber); Spacer(Modifier.width(8.dp))
-            Text(text ?: "", color = Palette.Cream, fontWeight = FontWeight.SemiBold)
+private fun ActivityPills(labels: List<String>, modifier: Modifier) {
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        labels.take(3).forEach { text ->
+            key(text) {
+                val shown = remember { MutableTransitionState(false).apply { targetState = true } }
+                AnimatedVisibility(shown, enter = slideInVertically { -it } + fadeIn()) {
+                    Row(Modifier.clay(Palette.Bark, 50.dp, 12.dp).padding(horizontal = 18.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        ThinkingDots(Palette.Amber); Spacer(Modifier.width(8.dp))
+                        Text(text, color = Palette.Cream, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
         }
+        if (labels.size > 3) Text("+${labels.size - 3} more running", color = Palette.Bark, style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.clay(Palette.Cream, 50.dp, 4.dp).padding(horizontal = 12.dp, vertical = 5.dp))
     }
 }
 
 @Composable
 private fun Toast(s: AppState, modifier: Modifier) {
-    LaunchedEffect(s.toast) { if (s.toast != null) { delay(3200); s.toast = null } }
+    val current = s.toasts.firstOrNull()
+    LaunchedEffect(current?.first) { if (current != null) { delay(if (s.toasts.size > 1) 2200 else 3200); s.toast = null } }
     AnimatedVisibility(s.toast != null, modifier, enter = slideInVertically { it } + fadeIn() + scaleIn(initialScale = .8f), exit = fadeOut() + slideOutVertically { it }) {
         Text(s.toast ?: "", color = Palette.Cream, fontWeight = FontWeight.SemiBold,
             modifier = Modifier.widthIn(max = 600.dp).clay(Palette.Olive, 50.dp, 14.dp).padding(horizontal = 20.dp, vertical = 12.dp))

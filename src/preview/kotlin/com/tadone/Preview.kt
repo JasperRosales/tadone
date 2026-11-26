@@ -19,6 +19,33 @@ fun main() {
         Db.upsert(Task(title = "Group project slides", course = "IT Elective", dueAt = now + 9 * d, priority = 0))
         Db.upsert(Task(title = "Math worksheet 4", course = "Calculus", done = true))
     }
+    if (Db.events().isEmpty()) {
+        Db.upsertEvent(com.tadone.data.ScheduleEvent(title = "Biology lecture", location = "Room 204", days = 0b0010101, startMin = 9 * 60, endMin = 10 * 60 + 30, color = 1))
+        Db.upsertEvent(com.tadone.data.ScheduleEvent(title = "Calculus", location = "Hall B", days = 0b0001010, startMin = 13 * 60, endMin = 14 * 60 + 30, color = 2))
+        Db.upsertEvent(com.tadone.data.ScheduleEvent(title = "English 101", days = 0b0010101, startMin = 15 * 60, endMin = 16 * 60, color = 0))
+        Db.upsertEvent(com.tadone.data.ScheduleEvent(title = "Study group", date = java.time.LocalDate.now().toEpochDay(), startMin = 18 * 60, endMin = 19 * 60 + 30, color = 4))
+    }
+    if (Db.notes().isEmpty()) {
+        val quiz = com.tadone.ai.Quiz.toJson(listOf(
+            com.tadone.ai.QuizQuestion("Where does glycolysis take place?", listOf("Mitochondrial matrix", "Cytoplasm", "Inner mitochondrial membrane", "Nucleus"), 1, "Glycolysis happens in the cytoplasm and does not need oxygen."),
+            com.tadone.ai.QuizQuestion("Which stage produces the most ATP?", listOf("Glycolysis", "Krebs cycle", "Electron transport chain", "Fermentation"), 2, "Oxidative phosphorylation in the ETC yields about 34 ATP."),
+        ))
+        Db.upsertNote(com.tadone.data.Note(title = "Cell respiration", course = "Biology", quiz = quiz,
+            body = "Cellular respiration turns glucose into ATP.\n\n1. Glycolysis (cytoplasm): glucose -> 2 pyruvate, net 2 ATP\n2. Krebs cycle (matrix): makes NADH, FADH2\n3. Electron transport chain: ~34 ATP, oxygen is the final electron acceptor"))
+        Db.upsertNote(com.tadone.data.Note(title = "Limits and continuity", course = "Calculus", body = "A function is continuous at a if the limit equals f(a)."))
+    }
+    if (Db.courses().isEmpty()) {
+        Db.saveCourses(listOf(com.tadone.data.Course("c1", "Biology 2", "Section B", "Room 204", "https://classroom.google.com"),
+            com.tadone.data.Course("c2", "Calculus", "BSIT 2-1"), com.tadone.data.Course("c3", "English 101")))
+        Db.saveModules("c1", listOf(com.tadone.data.Topic("c1", "t1", "Module 1: Cells"), com.tadone.data.Topic("c1", "t2", "Module 2: Energy")), listOf(
+            com.tadone.data.CourseItem("c1", "i1", "material", "t1", "Lecture slides: Cell structure", "Read before Monday.",
+                "https://classroom.google.com", materials = listOf(com.tadone.data.Attachment("Cell structure.pdf", "https://drive.google.com", "drive"), com.tadone.data.Attachment("Cell tour", "https://youtube.com", "video")), createdAt = "2026-11-02"),
+            com.tadone.data.CourseItem("c1", "i2", "assignment", "t1", "Lab 1: Microscope drawing", "Draw and label an onion cell.", "https://classroom.google.com", System.currentTimeMillis() + 2 * 86_400_000L, createdAt = "2026-11-03"),
+            com.tadone.data.CourseItem("c1", "i3", "question", "t2", "Where does glycolysis happen?", createdAt = "2026-11-10"),
+            com.tadone.data.CourseItem("c1", "i4", "material", "t2", "Reading: Cellular respiration", materials = listOf(com.tadone.data.Attachment("Chapter 5", "https://drive.google.com", "drive")), createdAt = "2026-11-11"),
+            com.tadone.data.CourseItem("c1", "i5", "material", null, "Course syllabus", createdAt = "2026-10-01"),
+        ))
+    }
     fun shot(name: String, w: Int, h: Int, ms: Long, content: @Composable () -> Unit) {
         ImageComposeScene(w, h, content = { TadoneTheme { content() } }).use { sc ->
             var t = 0L; while (t <= ms) { sc.render(t * 1_000_000); t += 16 }
@@ -26,7 +53,23 @@ fun main() {
         }
     }
     shot("splash", 440, 460, 2200) { Splash(.7f) }
+    shot("signin", 1240, 800, 1500) { App() }
+    Db.set(com.tadone.data.Keys.OFFLINE, "1")
     shot("tasks", 1240, 800, 1500) { App() }
+    Db.set(com.tadone.data.Keys.COMPOSIO_KEY, "preview")
+    shot("apps", 1240, 800, 1500) {
+        val s = AppState(rememberCoroutineScope()).apply { connections = mapOf("google_classroom" to "x", "googledocs" to "y"); connecting = setOf("googlesheets") }
+        com.tadone.ui.AppsScreen(s)
+    }
+    shot("schedule", 1240, 800, 1500) { com.tadone.ui.ScheduleScreen(AppState(rememberCoroutineScope()).apply { reload() }) }
+    shot("notes", 1240, 800, 1500) { com.tadone.ui.NotesScreen(AppState(rememberCoroutineScope()).apply { reload(); selectedNoteId = notes.last().id }) }
+    shot("quiz", 1240, 800, 1500) { com.tadone.ui.NotesScreen(AppState(rememberCoroutineScope()).apply { reload(); selectedNoteId = notes.first { it.quiz.isNotBlank() }.id; noteTab = 1 }) }
+    Db.set(com.tadone.data.Keys.COMPOSIO_KEY, "preview")
+    shot("classes", 1240, 800, 1500) { com.tadone.ui.ClassesScreen(AppState(rememberCoroutineScope()).apply { reload(); openCourse("c1") }) }
+    Db.set(com.tadone.data.Keys.COMPOSIO_KEY, "")
+    shot("tasks-short", 1240, 640, 1500) { App() }
+    shot("settings", 1240, 800, 1500) { com.tadone.ui.SettingsScreen(AppState(rememberCoroutineScope()).apply { account = "student@example.com · my_project"; gettingGeminiKey = true }) }
+    Db.set(com.tadone.data.Keys.COMPOSIO_KEY, "")
     shot("detail", 1240, 800, 1500) {
         val s = AppState(rememberCoroutineScope()).apply { reload(); selectedId = tasks.first { it.isClassroom }.id }
         CompositionLocalProvider { com.tadone.ui.TasksScreen(s) }
